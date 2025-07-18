@@ -7,6 +7,7 @@ from discord import Intents, app_commands, Interaction, TextChannel
 from pymongo import MongoClient
 import asyncpraw
 from dotenv import load_dotenv
+import traceback
 
 # Load environment variables
 load_dotenv()
@@ -100,15 +101,15 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
     if not await admin_only(interaction):
         return
     subreddit = subreddit.lower()
+    await interaction.response.defer(ephemeral=True)
     try:
-        await interaction.response.defer(ephemeral=True)
         sub = await reddit.subreddit(subreddit)
         await sub.load()
         if not sub.over18:
             await interaction.followup.send(f"❌ r/{subreddit} is not marked as NSFW.")
             return
     except Exception as e:
-        logger.error(f"Error checking subreddit NSFW: {e}")
+        logger.error(f"Error checking subreddit NSFW: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         await interaction.followup.send(f"❌ Could not find r/{subreddit}.")
         return
     mappings_col.update_one({"subreddit": subreddit}, {"$set": {"channel_id": str(channel.id)}}, upsert=True)
