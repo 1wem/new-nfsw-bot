@@ -209,7 +209,7 @@ async def fetch_and_post():
 
 # Sync commands on startup
 @bot.event
-def on_ready():
+async def on_ready():
     print(f'Logged in as {bot.user}')
     keep_alive()
     try:
