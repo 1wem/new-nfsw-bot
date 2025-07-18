@@ -1,5 +1,7 @@
 import os
 import asyncio
+import logging
+import random
 from discord.ext import commands, tasks
 from discord import Intents, app_commands, Interaction, TextChannel, Embed
 from pymongo import MongoClient
@@ -7,8 +9,6 @@ import asyncpraw
 from flask import Flask
 from threading import Thread
 from dotenv import load_dotenv
-import random
-import logging
 
 # Load environment variables
 load_dotenv()
@@ -83,7 +83,32 @@ async def admin_only(interaction: Interaction):
         return False
     return True
 
-# Slash command: Set subreddit to channel mapping
+# Helper: Check if media was already posted
+def was_posted(post_id):
+    return posted_col.find_one({"post_id": post_id}) is not None
+
+def mark_posted(post_id):
+    posted_col.insert_one({"post_id": post_id})
+
+# Helper: Extract media URL from Reddit submission
+# Returns (media_url, is_image, is_gif, is_redgif, is_video)
+async def extract_media(sub):
+    if hasattr(sub, "post_hint"):
+        if sub.post_hint == "image":
+            return (sub.url, True, sub.url.endswith(".gif"), False, False)
+        if sub.post_hint == "hosted:video" and hasattr(sub, "media") and sub.media:
+            reddit_video = sub.media.get("reddit_video")
+            if reddit_video:
+                return (reddit_video.get("fallback_url"), False, False, False, True)
+        if sub.post_hint == "rich:video" and "redgifs" in sub.url:
+            return (sub.url, False, False, True, False)
+    if sub.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
+        return (sub.url, True, sub.url.endswith('.gif'), False, False)
+    if sub.url.endswith(('.mp4', '.webm', '.mov')):
+        return (sub.url, False, False, False, True)
+    return (sub.url, False, False, False, False)
+
+# Slash command: Set subreddit to channel mapping (with workaround)
 @tree.command(name="setsubreddit", description="Map a subreddit to a channel.")
 @app_commands.describe(subreddit="Subreddit name (without r/)", channel="Channel to post in")
 async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextChannel):
@@ -91,8 +116,11 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
         return
     subreddit = subreddit.lower()
     try:
-        sub = await reddit.subreddit(subreddit)
-        await sub.load()
+        async def fetch_subreddit():
+            sub = await reddit.subreddit(subreddit)
+            await sub.load()
+            return sub
+        sub = await asyncio.create_task(fetch_subreddit())
         if not sub.over18:
             await interaction.response.send_message(f"❌ r/{subreddit} is not marked as NSFW.", ephemeral=True)
             return
@@ -164,34 +192,38 @@ async def showposts(interaction: Interaction):
     count = get_posts_per_interval()
     await interaction.response.send_message(f"Currently set to send {count} post(s) per channel per interval.", ephemeral=True)
 
-# Helper: Check if media was already posted
-def was_posted(post_id):
-    return posted_col.find_one({"post_id": post_id}) is not None
-
-def mark_posted(post_id):
-    posted_col.insert_one({"post_id": post_id})
-
-# Helper: Extract media URL from Reddit submission
-# Returns (media_url, is_image, is_gif, is_redgif, is_video)
-async def extract_media(sub):
-    if hasattr(sub, "post_hint"):
-        if sub.post_hint == "image":
-            return (sub.url, True, sub.url.endswith(".gif"), False, False)
-        if sub.post_hint == "hosted:video" and hasattr(sub, "media") and sub.media:
-            # Allow Reddit-hosted videos
-            reddit_video = sub.media.get("reddit_video")
-            if reddit_video:
-                return (reddit_video.get("fallback_url"), False, False, False, True)
-        if sub.post_hint == "rich:video" and "redgifs" in sub.url:
-            # Redgifs: try to get direct .mp4
-            return (sub.url, False, False, True, False)
-    # Fallback: check url extension
-    if sub.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-        return (sub.url, True, sub.url.endswith('.gif'), False, False)
-    if sub.url.endswith(('.mp4', '.webm', '.mov')):
-        # Allow direct video links
-        return (sub.url, False, False, False, True)
-    return (sub.url, False, False, False, False)
+# Slash command: Force send latest media from subreddit to channel
+@tree.command(name="forcesend", description="Force send the latest media from a subreddit to a channel.")
+@app_commands.describe(subreddit="Subreddit name (without r/)", channel="Channel to post in")
+async def forcesend(interaction: Interaction, subreddit: str, channel: TextChannel):
+    if not await admin_only(interaction):
+        return
+    subreddit = subreddit.lower()
+    try:
+        sub = await reddit.subreddit(subreddit, fetch=True)
+        submissions = [s async for s in sub.new(limit=10) if s.over_18]
+        for submission in submissions:
+            media_url, is_image, is_gif, is_redgif, is_video = await extract_media(submission)
+            if not (is_image or is_gif or is_redgif or is_video):
+                continue
+            embed = Embed(title=submission.title[:256], url=f"https://reddit.com{submission.permalink}", description=f"Posted by u/{submission.author}")
+            embed.set_footer(text=f"r/{subreddit}")
+            if is_image or is_gif:
+                embed.set_image(url=media_url)
+            elif is_redgif:
+                embed.add_field(name="Redgifs Video", value=media_url, inline=False)
+            elif is_video:
+                embed.add_field(name="Video", value=media_url, inline=False)
+            else:
+                embed.add_field(name="Media", value=media_url, inline=False)
+            await channel.send(embed=embed)
+            logger.info(f"Force sent media from r/{subreddit} to channel {channel.id}")
+            await interaction.response.send_message(f"✅ Forced sent media from r/{subreddit} to {channel.mention}.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"❌ No suitable media found in r/{subreddit}.", ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error in /forcesend: {e}")
+        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
 
 # Background task: Fetch and post media
 @tasks.loop(minutes=1)
@@ -240,39 +272,6 @@ async def fetch_and_post():
         except Exception as e:
             logger.error(f"Error fetching from r/{subreddit}: {e}")
 
-# Slash command: Force send latest media from subreddit to channel
-@tree.command(name="forcesend", description="Force send the latest media from a subreddit to a channel.")
-@app_commands.describe(subreddit="Subreddit name (without r/)", channel="Channel to post in")
-async def forcesend(interaction: Interaction, subreddit: str, channel: TextChannel):
-    if not await admin_only(interaction):
-        return
-    subreddit = subreddit.lower()
-    try:
-        sub = await reddit.subreddit(subreddit, fetch=True)
-        submissions = [s async for s in sub.new(limit=10) if s.over_18]
-        for submission in submissions:
-            media_url, is_image, is_gif, is_redgif, is_video = await extract_media(submission)
-            if not (is_image or is_gif or is_redgif or is_video):
-                continue
-            embed = Embed(title=submission.title[:256], url=f"https://reddit.com{submission.permalink}", description=f"Posted by u/{submission.author}")
-            embed.set_footer(text=f"r/{subreddit}")
-            if is_image or is_gif:
-                embed.set_image(url=media_url)
-            elif is_redgif:
-                embed.add_field(name="Redgifs Video", value=media_url, inline=False)
-            elif is_video:
-                embed.add_field(name="Video", value=media_url, inline=False)
-            else:
-                embed.add_field(name="Media", value=media_url, inline=False)
-            await channel.send(embed=embed)
-            logger.info(f"Force sent media from r/{subreddit} to channel {channel.id}")
-            await interaction.response.send_message(f"✅ Forced sent media from r/{subreddit} to {channel.mention}.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"❌ No suitable media found in r/{subreddit}.", ephemeral=True)
-    except Exception as e:
-        logger.error(f"Error in /forcesend: {e}")
-        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
-
 # Sync commands on startup
 @bot.event
 async def on_ready():
@@ -287,4 +286,4 @@ async def on_ready():
         fetch_and_post.start()
 
 if __name__ == "__main__":
-    bot.run(DISCORD_TOKEN) 
+    bot.run(DISCORD_TOKEN)
