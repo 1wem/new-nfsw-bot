@@ -5,7 +5,7 @@ import random
 from discord.ext import commands, tasks
 from discord import Intents, app_commands, Interaction, TextChannel
 from pymongo import MongoClient
-import asyncpraw
+import praw
 from dotenv import load_dotenv
 import traceback
 
@@ -28,8 +28,8 @@ mappings_col = db['subreddit_channel_mappings']
 posted_col = db['posted_media']
 settings_col = db['settings']
 
-# Reddit setup
-reddit = asyncpraw.Reddit(
+# Reddit setup (PRAW)
+reddit = praw.Reddit(
     client_id=REDDIT_CLIENT_ID,
     client_secret=REDDIT_CLIENT_SECRET,
     user_agent=REDDIT_USER_AGENT
@@ -80,7 +80,7 @@ def mark_posted(post_id):
 
 # Helper: Extract video media URL from Reddit submission
 # Returns (media_url, is_redgif, is_video)
-async def extract_video_media(sub):
+def extract_video_media(sub):
     # Redgifs
     if hasattr(sub, "post_hint") and sub.post_hint == "rich:video" and "redgifs" in sub.url:
         return (sub.url, True, False)
@@ -103,9 +103,10 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
     subreddit = subreddit.lower()
     await interaction.response.defer(ephemeral=True)
     try:
-        sub = await reddit.subreddit(subreddit)
-        await sub.load()
-        if not sub.over18:
+        sub = await asyncio.to_thread(lambda: reddit.subreddit(subreddit))
+        # PRAW: .over18 is always available, but triggers a fetch if not cached
+        is_nsfw = await asyncio.to_thread(lambda: sub.over18)
+        if not is_nsfw:
             await interaction.followup.send(f"❌ r/{subreddit} is not marked as NSFW.")
             return
     except Exception as e:
@@ -190,10 +191,10 @@ async def forcesend(interaction: Interaction, subreddit: str, channel: TextChann
     subreddit = subreddit.lower()
     await interaction.response.defer(ephemeral=True)
     try:
-        sub = await reddit.subreddit(subreddit, fetch=True)
-        submissions = [s async for s in sub.new(limit=10) if s.over_18]
+        sub = await asyncio.to_thread(lambda: reddit.subreddit(subreddit))
+        submissions = await asyncio.to_thread(lambda: [s for s in sub.new(limit=10) if s.over_18])
         for submission in submissions:
-            media_url, is_redgif, is_video = await extract_video_media(submission)
+            media_url, is_redgif, is_video = extract_video_media(submission)
             if not (is_redgif or is_video):
                 continue
             await channel.send(media_url)
@@ -202,7 +203,7 @@ async def forcesend(interaction: Interaction, subreddit: str, channel: TextChann
             return
         await interaction.followup.send(f"❌ No suitable video found in r/{subreddit}.")
     except Exception as e:
-        logger.error(f"Error in /forcesend: {e}")
+        logger.error(f"Error in /forcesend: {type(e).__name__}: {e}\n{traceback.format_exc()}")
         await interaction.followup.send(f"❌ Error: {e}")
 
 # Background task: Fetch and post videos
@@ -220,8 +221,8 @@ async def fetch_and_post():
         if not channel:
             continue
         try:
-            sub = await reddit.subreddit(subreddit, fetch=True)
-            submissions = [s async for s in sub.new(limit=30) if s.over_18]
+            sub = await asyncio.to_thread(lambda: reddit.subreddit(subreddit))
+            submissions = await asyncio.to_thread(lambda: [s for s in sub.new(limit=30) if s.over_18])
             random.shuffle(submissions)
             sent = 0
             for submission in submissions:
@@ -229,7 +230,7 @@ async def fetch_and_post():
                     break
                 if was_posted(submission.id):
                     continue
-                media_url, is_redgif, is_video = await extract_video_media(submission)
+                media_url, is_redgif, is_video = extract_video_media(submission)
                 if not (is_redgif or is_video):
                     continue
                 try:
@@ -240,7 +241,7 @@ async def fetch_and_post():
                 except Exception as e:
                     logger.error(f"Failed to send to {channel}: {e}")
         except Exception as e:
-            logger.error(f"Error fetching from r/{subreddit}: {e}")
+            logger.error(f"Error fetching from r/{subreddit}: {type(e).__name__}: {e}\n{traceback.format_exc()}")
 
 # Sync commands on startup
 @bot.event
