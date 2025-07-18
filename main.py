@@ -92,6 +92,7 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
     subreddit = subreddit.lower()
     try:
         sub = await reddit.subreddit(subreddit)
+        await sub.load()
         if not sub.over18:
             await interaction.response.send_message(f"❌ r/{subreddit} is not marked as NSFW.", ephemeral=True)
             return
