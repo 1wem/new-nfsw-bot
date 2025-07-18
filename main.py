@@ -3,7 +3,7 @@ import asyncio
 import logging
 import random
 from discord.ext import commands, tasks
-from discord import Intents, app_commands, Interaction, TextChannel, Embed
+from discord import Intents, app_commands, Interaction, TextChannel
 from pymongo import MongoClient
 import asyncpraw
 from flask import Flask
@@ -90,25 +90,23 @@ def was_posted(post_id):
 def mark_posted(post_id):
     posted_col.insert_one({"post_id": post_id})
 
-# Helper: Extract media URL from Reddit submission
-# Returns (media_url, is_image, is_gif, is_redgif, is_video)
-async def extract_media(sub):
-    if hasattr(sub, "post_hint"):
-        if sub.post_hint == "image":
-            return (sub.url, True, sub.url.endswith(".gif"), False, False)
-        if sub.post_hint == "hosted:video" and hasattr(sub, "media") and sub.media:
-            reddit_video = sub.media.get("reddit_video")
-            if reddit_video:
-                return (reddit_video.get("fallback_url"), False, False, False, True)
-        if sub.post_hint == "rich:video" and "redgifs" in sub.url:
-            return (sub.url, False, False, True, False)
-    if sub.url.endswith(('.jpg', '.jpeg', '.png', '.gif')):
-        return (sub.url, True, sub.url.endswith('.gif'), False, False)
+# Helper: Extract video media URL from Reddit submission
+# Returns (media_url, is_redgif, is_video)
+async def extract_video_media(sub):
+    # Redgifs
+    if hasattr(sub, "post_hint") and sub.post_hint == "rich:video" and "redgifs" in sub.url:
+        return (sub.url, True, False)
+    # Reddit-hosted video (v.redd.it)
+    if hasattr(sub, "post_hint") and sub.post_hint == "hosted:video" and hasattr(sub, "media") and sub.media:
+        reddit_video = sub.media.get("reddit_video")
+        if reddit_video and reddit_video.get("fallback_url"):
+            return (reddit_video.get("fallback_url"), False, True)
+    # Direct video links
     if sub.url.endswith(('.mp4', '.webm', '.mov')):
-        return (sub.url, False, False, False, True)
-    return (sub.url, False, False, False, False)
+        return (sub.url, False, True)
+    return (None, False, False)
 
-# Slash command: Set subreddit to channel mapping (with workaround)
+# Slash command: Set subreddit to channel mapping (admin only)
 @tree.command(name="setsubreddit", description="Map a subreddit to a channel.")
 @app_commands.describe(subreddit="Subreddit name (without r/)", channel="Channel to post in")
 async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextChannel):
@@ -130,7 +128,7 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
     logger.info(f"Mapped r/{subreddit} to channel {channel.id}")
     await interaction.followup.send(f"✅ Mapped r/{subreddit} to {channel.mention}.")
 
-# Slash command: Remove subreddit mapping
+# Slash command: Remove subreddit mapping (admin only)
 @tree.command(name="removesubreddit", description="Remove a subreddit to channel mapping.")
 @app_commands.describe(subreddit="Subreddit name (without r/)")
 async def removesubreddit(interaction: Interaction, subreddit: str):
@@ -160,7 +158,7 @@ async def listmappings(interaction: Interaction):
         msg += f"r/{m['subreddit']} → {channel_mention}\n"
     await interaction.followup.send(msg)
 
-# Slash command: Set fetch interval
+# Slash command: Set fetch interval (admin only)
 @tree.command(name="setinterval", description="Set the fetch interval in minutes.")
 @app_commands.describe(minutes="Interval in minutes (min 1)")
 async def setinterval(interaction: Interaction, minutes: int):
@@ -174,7 +172,7 @@ async def setinterval(interaction: Interaction, minutes: int):
     logger.info(f"Fetch interval set to {minutes} minutes")
     await interaction.followup.send(f"✅ Fetch interval set to {minutes} minutes.")
 
-# Slash command: Set posts per interval
+# Slash command: Set posts per interval (admin only)
 @tree.command(name="setposts", description="Set how many posts per channel per interval.")
 @app_commands.describe(count="Number of posts per channel per interval (min 1, max 10)")
 async def setposts(interaction: Interaction, count: int):
@@ -195,8 +193,8 @@ async def showposts(interaction: Interaction):
     count = get_posts_per_interval()
     await interaction.followup.send(f"Currently set to send {count} post(s) per channel per interval.")
 
-# Slash command: Force send latest media from subreddit to channel
-@tree.command(name="forcesend", description="Force send the latest media from a subreddit to a channel.")
+# Slash command: Force send latest video from subreddit to channel (admin only)
+@tree.command(name="forcesend", description="Force send the latest video from a subreddit to a channel.")
 @app_commands.describe(subreddit="Subreddit name (without r/)", channel="Channel to post in")
 async def forcesend(interaction: Interaction, subreddit: str, channel: TextChannel):
     if not await admin_only(interaction):
@@ -207,29 +205,19 @@ async def forcesend(interaction: Interaction, subreddit: str, channel: TextChann
         sub = await reddit.subreddit(subreddit, fetch=True)
         submissions = [s async for s in sub.new(limit=10) if s.over_18]
         for submission in submissions:
-            media_url, is_image, is_gif, is_redgif, is_video = await extract_media(submission)
-            if not (is_image or is_gif or is_redgif or is_video):
+            media_url, is_redgif, is_video = await extract_video_media(submission)
+            if not (is_redgif or is_video):
                 continue
-            embed = Embed(title=submission.title[:256], url=f"https://reddit.com{submission.permalink}", description=f"Posted by u/{submission.author}")
-            embed.set_footer(text=f"r/{subreddit}")
-            if is_image or is_gif:
-                embed.set_image(url=media_url)
-            elif is_redgif:
-                embed.add_field(name="Redgifs Video", value=media_url, inline=False)
-            elif is_video:
-                embed.add_field(name="Video", value=media_url, inline=False)
-            else:
-                embed.add_field(name="Media", value=media_url, inline=False)
-            await channel.send(embed=embed)
-            logger.info(f"Force sent media from r/{subreddit} to channel {channel.id}")
-            await interaction.followup.send(f"✅ Forced sent media from r/{subreddit} to {channel.mention}.")
+            await channel.send(media_url)
+            logger.info(f"Force sent video from r/{subreddit} to channel {channel.id}")
+            await interaction.followup.send(f"✅ Forced sent video from r/{subreddit} to {channel.mention}.")
             return
-        await interaction.followup.send(f"❌ No suitable media found in r/{subreddit}.")
+        await interaction.followup.send(f"❌ No suitable video found in r/{subreddit}.")
     except Exception as e:
         logger.error(f"Error in /forcesend: {e}")
         await interaction.followup.send(f"❌ Error: {e}")
 
-# Background task: Fetch and post media
+# Background task: Fetch and post videos
 @tasks.loop(minutes=1)
 async def fetch_and_post():
     interval = get_fetch_interval()
@@ -253,24 +241,14 @@ async def fetch_and_post():
                     break
                 if was_posted(submission.id):
                     continue
-                media_url, is_image, is_gif, is_redgif, is_video = await extract_media(submission)
-                if not (is_image or is_gif or is_redgif or is_video):
+                media_url, is_redgif, is_video = await extract_video_media(submission)
+                if not (is_redgif or is_video):
                     continue
-                embed = Embed(title=submission.title[:256], url=f"https://reddit.com{submission.permalink}", description=f"Posted by u/{submission.author}")
-                embed.set_footer(text=f"r/{subreddit}")
-                if is_image or is_gif:
-                    embed.set_image(url=media_url)
-                elif is_redgif:
-                    embed.add_field(name="Redgifs Video", value=media_url, inline=False)
-                elif is_video:
-                    embed.add_field(name="Video", value=media_url, inline=False)
-                else:
-                    embed.add_field(name="Media", value=media_url, inline=False)
                 try:
-                    await channel.send(embed=embed)
+                    await channel.send(media_url)
                     mark_posted(submission.id)
                     sent += 1
-                    logger.info(f"Posted media from r/{subreddit} to channel {channel.id}")
+                    logger.info(f"Posted video from r/{subreddit} to channel {channel.id}")
                 except Exception as e:
                     logger.error(f"Failed to send to {channel}: {e}")
         except Exception as e:
