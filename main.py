@@ -6,6 +6,7 @@ from discord.ext import commands, tasks
 from discord import Intents, app_commands, Interaction, TextChannel
 from pymongo import MongoClient
 import asyncpraw
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
