@@ -116,21 +116,19 @@ async def setsubreddit(interaction: Interaction, subreddit: str, channel: TextCh
         return
     subreddit = subreddit.lower()
     try:
-        async def fetch_subreddit():
-            sub = await reddit.subreddit(subreddit)
-            await sub.load()
-            return sub
-        sub = await asyncio.create_task(fetch_subreddit())
+        await interaction.response.defer(ephemeral=True)
+        sub = await reddit.subreddit(subreddit)
+        await sub.load()
         if not sub.over18:
-            await interaction.response.send_message(f"❌ r/{subreddit} is not marked as NSFW.", ephemeral=True)
+            await interaction.followup.send(f"❌ r/{subreddit} is not marked as NSFW.")
             return
     except Exception as e:
         logger.error(f"Error checking subreddit NSFW: {e}")
-        await interaction.response.send_message(f"❌ Could not find r/{subreddit}.", ephemeral=True)
+        await interaction.followup.send(f"❌ Could not find r/{subreddit}.")
         return
     mappings_col.update_one({"subreddit": subreddit}, {"$set": {"channel_id": str(channel.id)}}, upsert=True)
     logger.info(f"Mapped r/{subreddit} to channel {channel.id}")
-    await interaction.response.send_message(f"✅ Mapped r/{subreddit} to {channel.mention}.", ephemeral=True)
+    await interaction.followup.send(f"✅ Mapped r/{subreddit} to {channel.mention}.")
 
 # Slash command: Remove subreddit mapping
 @tree.command(name="removesubreddit", description="Remove a subreddit to channel mapping.")
@@ -139,26 +137,28 @@ async def removesubreddit(interaction: Interaction, subreddit: str):
     if not await admin_only(interaction):
         return
     subreddit = subreddit.lower()
+    await interaction.response.defer(ephemeral=True)
     result = mappings_col.delete_one({"subreddit": subreddit})
     if result.deleted_count:
         logger.info(f"Removed mapping for r/{subreddit}")
-        await interaction.response.send_message(f"✅ Removed mapping for r/{subreddit}.", ephemeral=True)
+        await interaction.followup.send(f"✅ Removed mapping for r/{subreddit}.")
     else:
-        await interaction.response.send_message(f"❌ No mapping found for r/{subreddit}.", ephemeral=True)
+        await interaction.followup.send(f"❌ No mapping found for r/{subreddit}.")
 
 # Slash command: List all mappings
 @tree.command(name="listmappings", description="List all subreddit to channel mappings.")
 async def listmappings(interaction: Interaction):
+    await interaction.response.defer(ephemeral=True)
     mappings = list(mappings_col.find())
     if not mappings:
-        await interaction.response.send_message("No mappings set.", ephemeral=True)
+        await interaction.followup.send("No mappings set.")
         return
     msg = "**Subreddit → Channel**\n"
     for m in mappings:
         channel = interaction.guild.get_channel(int(m["channel_id"]))
         channel_mention = channel.mention if channel else f"(ID: {m['channel_id']})"
         msg += f"r/{m['subreddit']} → {channel_mention}\n"
-    await interaction.response.send_message(msg, ephemeral=True)
+    await interaction.followup.send(msg)
 
 # Slash command: Set fetch interval
 @tree.command(name="setinterval", description="Set the fetch interval in minutes.")
@@ -166,12 +166,13 @@ async def listmappings(interaction: Interaction):
 async def setinterval(interaction: Interaction, minutes: int):
     if not await admin_only(interaction):
         return
+    await interaction.response.defer(ephemeral=True)
     if minutes < 1:
-        await interaction.response.send_message("❌ Interval must be at least 1 minute.", ephemeral=True)
+        await interaction.followup.send("❌ Interval must be at least 1 minute.")
         return
     set_fetch_interval(minutes)
     logger.info(f"Fetch interval set to {minutes} minutes")
-    await interaction.response.send_message(f"✅ Fetch interval set to {minutes} minutes.", ephemeral=True)
+    await interaction.followup.send(f"✅ Fetch interval set to {minutes} minutes.")
 
 # Slash command: Set posts per interval
 @tree.command(name="setposts", description="Set how many posts per channel per interval.")
@@ -179,18 +180,20 @@ async def setinterval(interaction: Interaction, minutes: int):
 async def setposts(interaction: Interaction, count: int):
     if not await admin_only(interaction):
         return
+    await interaction.response.defer(ephemeral=True)
     if count < 1 or count > 10:
-        await interaction.response.send_message("❌ Count must be between 1 and 10.", ephemeral=True)
+        await interaction.followup.send("❌ Count must be between 1 and 10.")
         return
     set_posts_per_interval(count)
     logger.info(f"Posts per interval set to {count}")
-    await interaction.response.send_message(f"✅ Will send {count} post(s) per channel per interval.", ephemeral=True)
+    await interaction.followup.send(f"✅ Will send {count} post(s) per channel per interval.")
 
 # Slash command: Show posts per interval
 @tree.command(name="showposts", description="Show how many posts per channel per interval.")
 async def showposts(interaction: Interaction):
+    await interaction.response.defer(ephemeral=True)
     count = get_posts_per_interval()
-    await interaction.response.send_message(f"Currently set to send {count} post(s) per channel per interval.", ephemeral=True)
+    await interaction.followup.send(f"Currently set to send {count} post(s) per channel per interval.")
 
 # Slash command: Force send latest media from subreddit to channel
 @tree.command(name="forcesend", description="Force send the latest media from a subreddit to a channel.")
@@ -199,6 +202,7 @@ async def forcesend(interaction: Interaction, subreddit: str, channel: TextChann
     if not await admin_only(interaction):
         return
     subreddit = subreddit.lower()
+    await interaction.response.defer(ephemeral=True)
     try:
         sub = await reddit.subreddit(subreddit, fetch=True)
         submissions = [s async for s in sub.new(limit=10) if s.over_18]
@@ -218,12 +222,12 @@ async def forcesend(interaction: Interaction, subreddit: str, channel: TextChann
                 embed.add_field(name="Media", value=media_url, inline=False)
             await channel.send(embed=embed)
             logger.info(f"Force sent media from r/{subreddit} to channel {channel.id}")
-            await interaction.response.send_message(f"✅ Forced sent media from r/{subreddit} to {channel.mention}.", ephemeral=True)
+            await interaction.followup.send(f"✅ Forced sent media from r/{subreddit} to {channel.mention}.")
             return
-        await interaction.response.send_message(f"❌ No suitable media found in r/{subreddit}.", ephemeral=True)
+        await interaction.followup.send(f"❌ No suitable media found in r/{subreddit}.")
     except Exception as e:
         logger.error(f"Error in /forcesend: {e}")
-        await interaction.response.send_message(f"❌ Error: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error: {e}")
 
 # Background task: Fetch and post media
 @tasks.loop(minutes=1)
