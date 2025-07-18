@@ -6,9 +6,6 @@ from discord.ext import commands, tasks
 from discord import Intents, app_commands, Interaction, TextChannel
 from pymongo import MongoClient
 import asyncpraw
-from flask import Flask
-from threading import Thread
-from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
@@ -41,17 +38,6 @@ intents = Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 tree = bot.tree
-
-# Flask keep-alive server
-app = Flask('')
-@app.route('/')
-def home():
-    return "Bot is alive!"
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
 
 # Helper: Get or set fetch interval (in minutes)
 def get_fetch_interval():
@@ -258,7 +244,6 @@ async def fetch_and_post():
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
-    keep_alive()
     try:
         bot.loop.create_task(tree.sync())
         print("Slash commands synced.")
